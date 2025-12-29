@@ -61,6 +61,50 @@ impl DiskMonitor {
         MetricValue::new(self.activity_level / self.max_activity)
     }
 
+    /// Check if a device name represents a physical (whole) device rather than a partition.
+    /// Handles traditional devices (sda, hda, vda), NVMe (nvme0n1), MMC (mmcblk0), etc.
+    fn is_physical_device(device_name: &str) -> bool {
+        // Skip virtual devices
+        if device_name.starts_with("loop")
+            || device_name.starts_with("ram")
+            || device_name.starts_with("dm-")
+        {
+            return false;
+        }
+
+        // NVMe devices: nvme0n1 is base, nvme0n1p1 is partition
+        // The 'p' before the partition number distinguishes partitions
+        if device_name.starts_with("nvme") {
+            // Find the 'n' that separates controller from namespace
+            // Base device: nvme0n1, nvme0n1 (no 'p' after the namespace number)
+            // Partition: nvme0n1p1, nvme0n1p2 (has 'p' followed by partition number)
+            // Check if there's a 'p' after 'n<digit>'
+            if let Some(n_pos) = device_name.find('n') {
+                let after_n = &device_name[n_pos + 1..];
+                // Skip digits after 'n' (namespace number), then check for 'p'
+                let after_namespace: String = after_n.chars().skip_while(|c| c.is_ascii_digit()).collect();
+                return !after_namespace.starts_with('p');
+            }
+            return true;
+        }
+
+        // MMC/SD cards: mmcblk0 is base, mmcblk0p1 is partition
+        if device_name.starts_with("mmcblk") {
+            // Similar to NVMe - partitions have 'p' before partition number
+            let after_prefix = &device_name[6..]; // Skip "mmcblk"
+            let after_device_num: String = after_prefix.chars().skip_while(|c| c.is_ascii_digit()).collect();
+            return !after_device_num.starts_with('p');
+        }
+
+        // Traditional devices (sd*, hd*, vd*, xvd*): base ends with letter, partition ends with digit
+        // sda = base device, sda1 = partition
+        device_name
+            .chars()
+            .last()
+            .map(|c| c.is_ascii_alphabetic())
+            .unwrap_or(false)
+    }
+
     /// Read total sectors read/written from /proc/diskstats
     fn read_disk_stats() -> (u64, u64) {
         let content = match fs::read_to_string("/proc/diskstats") {
@@ -79,30 +123,8 @@ impl DiskMonitor {
 
             let device_name = parts[2];
 
-            // Skip partitions (e.g., sda1) and only count whole devices (e.g., sda)
-            // Also skip loop devices and ram disks
-            if device_name.starts_with("loop")
-                || device_name.starts_with("ram")
-                || device_name.starts_with("dm-")
-            {
-                continue;
-            }
-
-            // Check if this is a partition (ends with a number after letters)
-            let is_partition = device_name
-                .chars()
-                .last()
-                .map(|c| c.is_ascii_digit())
-                .unwrap_or(false)
-                && device_name
-                    .chars()
-                    .rev()
-                    .skip(1)
-                    .next()
-                    .map(|c| c.is_alphabetic())
-                    .unwrap_or(false);
-
-            if is_partition {
+            // Only count whole/physical devices, skip partitions and virtual devices
+            if !Self::is_physical_device(device_name) {
                 continue;
             }
 

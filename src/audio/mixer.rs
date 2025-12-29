@@ -100,11 +100,21 @@ impl PlaybackElement {
     }
 
     fn play(&self) {
-        let _ = self.pipeline.set_state(gst::State::Playing);
+        if self.pipeline.set_state(gst::State::Playing).is_err() {
+            eprintln!("Failed to start audio pipeline");
+            return;
+        }
+        // Wait for state change to complete (up to 1 second)
+        let _ = self.pipeline.state(gst::ClockTime::from_seconds(1));
     }
 
     fn stop(&self) {
-        let _ = self.pipeline.set_state(gst::State::Null);
+        if self.pipeline.set_state(gst::State::Null).is_err() {
+            eprintln!("Failed to stop audio pipeline");
+            return;
+        }
+        // Wait for state change to complete (up to 500ms)
+        let _ = self.pipeline.state(gst::ClockTime::from_mseconds(500));
     }
 
     fn set_volume(&self, volume: f64) {
@@ -289,11 +299,21 @@ impl PerCoreCpuPlayer {
     }
 
     pub fn play(&self) {
-        let _ = self.pipeline.set_state(gst::State::Playing);
+        if self.pipeline.set_state(gst::State::Playing).is_err() {
+            eprintln!("Failed to start per-core CPU audio pipeline");
+            return;
+        }
+        // Wait for state change to complete (up to 1 second)
+        let _ = self.pipeline.state(gst::ClockTime::from_seconds(1));
     }
 
     pub fn stop(&self) {
-        let _ = self.pipeline.set_state(gst::State::Null);
+        if self.pipeline.set_state(gst::State::Null).is_err() {
+            eprintln!("Failed to stop per-core CPU audio pipeline");
+            return;
+        }
+        // Wait for state change to complete (up to 500ms)
+        let _ = self.pipeline.state(gst::ClockTime::from_mseconds(500));
     }
 
     /// Update a specific core's volume based on its CPU usage
@@ -380,6 +400,8 @@ impl AudioChannel {
     }
 
     pub fn play(&self) {
+        // Play primary first, then secondary
+        // Each call waits for state change to complete
         if let Some(ref p) = self.primary {
             p.play();
         }
@@ -389,6 +411,7 @@ impl AudioChannel {
     }
 
     pub fn stop(&self) {
+        // Stop both elements, each waits for state change
         if let Some(ref p) = self.primary {
             p.stop();
         }
