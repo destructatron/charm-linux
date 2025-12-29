@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::mixer::{AudioChannel, AudioMixer, CpuPlayback, PerCoreCpuPlayer};
+use super::pitch::GranularPitchElement;
 use crate::monitor::SystemMetrics;
 use crate::pack::SoundPack;
 
@@ -48,6 +49,9 @@ impl AudioEngine {
     pub fn new() -> Result<Self, AudioEngineError> {
         gst::init().map_err(AudioEngineError::GstreamerInit)?;
 
+        // Register our custom granular pitch element
+        GranularPitchElement::register()?;
+
         Ok(Self {
             mixer: Rc::new(RefCell::new(AudioMixer::new())),
             current_pack: None,
@@ -89,11 +93,12 @@ impl AudioEngine {
                 } else {
                     // Per-core mode: single source split to multiple panned outputs
                     // This ensures perfect sync - no stereo position weirdness on loop
-                    // Note: Per-core pitch is disabled (too CPU intensive), only volume + pan
+                    // Uses lightweight granular pitch shifting per core
                     let player = PerCoreCpuPlayer::new(
                         primary_path,
                         num_cpu_cores,
                         slide_interval,
+                        freq_fluct,
                     )?;
                     mixer.cpu_playback = Some(CpuPlayback::PerCore(player));
                 }

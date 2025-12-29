@@ -36,6 +36,7 @@ The GTK main loop drives periodic updates via `glib::timeout_add_local`. Each ti
 - **`audio/`** - GStreamer audio playback
   - `engine.rs` - High-level control (load pack, play/stop, route metrics to channels)
   - `mixer.rs` - GStreamer pipeline construction, `AudioChannel` for single streams, `PerCoreCpuPlayer` for synchronized per-core output
+  - `pitch.rs` - Custom lightweight granular pitch shifter (GStreamer element)
 - **`monitor/`** - System metrics via sysinfo crate (cpu.rs, memory.rs, disk.rs)
 - **`pack/`** - Sound pack loading, prefs.ini parsing with rust-ini
 - **`ui/`** - GTK3 startup dialog and libappindicator system tray
@@ -51,16 +52,26 @@ Packs use `prefs.ini` with Windows CHARM format:
 
 Per-core mode uses a single GStreamer pipeline with `tee` element splitting to N panned outputs:
 ```
-uridecodebin → tee → [queue → volume → panorama] × N → audiomixer → sink
+uridecodebin → tee → [queue → capsfilter(F32) → granularpitch → volume → panorama] × N → audiomixer → sink
 ```
 This ensures perfect loop synchronization across cores (prevents perceived stereo drift).
 
+### Granular Pitch Shifter
+
+The `granularpitch` element (`pitch.rs`) is a custom GStreamer element implementing lightweight pitch shifting:
+- Uses two-pointer granular synthesis with crossfading (no FFT)
+- 30ms grain size balances quality vs latency
+- Processes F32 audio samples in-place
+- CPU cost: ~O(1) per sample, suitable for N instances on multi-core systems
+- Replaces SoundTouch which was too CPU-intensive for per-core mode
+
 ### Key Design Decisions
 
-- Per-core pitch shifting is disabled (too CPU intensive with N pitch processors)
+- Per-core pitch shifting uses custom granular algorithm (not SoundTouch/phase vocoder)
 - `Rc<RefCell<>>` pattern used throughout for GTK callback ownership
 - Tray icon is reused when changing packs (not recreated) to avoid D-Bus registration conflicts
 - `try_borrow_mut()` used in some callbacks to handle reentrancy during GTK signal emission
+- GStreamer state changes wait for completion to prevent audio glitches
 
 ## Sound Pack Format
 

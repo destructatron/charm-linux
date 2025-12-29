@@ -149,18 +149,21 @@ impl Drop for PlaybackElement {
 /// A single pipeline that plays one audio file through multiple panned outputs.
 /// Used for per-core CPU mode where all cores must stay perfectly in sync.
 /// Uses tee to split one source to N panned branches, mixed back together.
-/// Note: Per-core pitch shifting is disabled due to high CPU cost (N pitch elements).
-/// Use averaged mode for pitch variation, or per-core for stereo positioning only.
+/// Per-core pitch shifting uses lightweight granular synthesis (not SoundTouch).
 pub struct PerCoreCpuPlayer {
     pipeline: gst::Pipeline,
     /// Volume elements for each core (index = core number)
     volume_elements: Vec<gst::Element>,
+    /// Pitch elements for each core (granular pitch shifter)
+    pitch_elements: Vec<gst::Element>,
     /// Current smoothed values per core
     current_values: Vec<f64>,
     /// Transition speed
     transition_speed: f64,
     /// Master volume
     master_volume: f64,
+    /// Whether pitch fluctuation is enabled
+    frequency_fluctuation: bool,
     _bus_watch: gst::bus::BusWatchGuard,
 }
 
@@ -169,6 +172,7 @@ impl PerCoreCpuPlayer {
         file_path: &Path,
         num_cores: usize,
         slide_interval: u32,
+        frequency_fluctuation: bool,
     ) -> Result<Self, gst::glib::BoolError> {
         let abs_path = if file_path.is_absolute() {
             file_path.to_path_buf()
@@ -209,13 +213,30 @@ impl PerCoreCpuPlayer {
             }
         });
 
-        // Create a branch for each core with panning
-        // Note: No per-core pitch shifting - too CPU intensive with N pitch elements
+        // Create a branch for each core with panning and pitch
         let mut volume_elements = Vec::with_capacity(num_cores);
+        let mut pitch_elements = Vec::with_capacity(num_cores);
 
         for i in 0..num_cores {
             let queue = gst::ElementFactory::make("queue").build()?;
             let branch_convert = gst::ElementFactory::make("audioconvert").build()?;
+
+            // Capsfilter to ensure F32 format for our pitch element
+            let capsfilter = gst::ElementFactory::make("capsfilter")
+                .property(
+                    "caps",
+                    gst::Caps::builder("audio/x-raw")
+                        .field("format", "F32LE")
+                        .field("layout", "interleaved")
+                        .build(),
+                )
+                .build()?;
+
+            // Granular pitch shifter (our lightweight custom element)
+            let pitch = gst::ElementFactory::make("granularpitch")
+                .property("pitch", 1.0f64)
+                .build()?;
+
             let volume = gst::ElementFactory::make("volume")
                 .property("volume", 0.0f64)
                 .build()?;
@@ -227,7 +248,7 @@ impl PerCoreCpuPlayer {
                 -1.0 + (2.0 * i as f64 / (num_cores - 1) as f64)
             };
 
-            pipeline.add_many([&queue, &branch_convert, &volume])?;
+            pipeline.add_many([&queue, &branch_convert, &capsfilter, &pitch, &volume])?;
 
             // Try to add panorama element
             if let Ok(panorama) = gst::ElementFactory::make("audiopanorama")
@@ -235,7 +256,7 @@ impl PerCoreCpuPlayer {
                 .build()
             {
                 pipeline.add(&panorama)?;
-                gst::Element::link_many([&queue, &branch_convert, &volume, &panorama])?;
+                gst::Element::link_many([&queue, &branch_convert, &capsfilter, &pitch, &volume, &panorama])?;
 
                 // Link tee to queue
                 let tee_pad = tee.request_pad_simple("src_%u").unwrap();
@@ -248,7 +269,7 @@ impl PerCoreCpuPlayer {
                 let _ = panorama_pad.link(&mixer_pad);
             } else {
                 // No panorama support, link directly
-                gst::Element::link_many([&queue, &branch_convert, &volume])?;
+                gst::Element::link_many([&queue, &branch_convert, &capsfilter, &pitch, &volume])?;
 
                 let tee_pad = tee.request_pad_simple("src_%u").unwrap();
                 let queue_pad = queue.static_pad("sink").unwrap();
@@ -260,6 +281,7 @@ impl PerCoreCpuPlayer {
             }
 
             volume_elements.push(volume);
+            pitch_elements.push(pitch);
         }
 
         // Set up looping
@@ -291,9 +313,11 @@ impl PerCoreCpuPlayer {
         Ok(Self {
             pipeline,
             volume_elements,
+            pitch_elements,
             current_values: vec![0.0; num_cores],
             transition_speed,
             master_volume: 1.0,
+            frequency_fluctuation,
             _bus_watch: bus_watch,
         })
     }
@@ -316,7 +340,7 @@ impl PerCoreCpuPlayer {
         let _ = self.pipeline.state(gst::ClockTime::from_mseconds(500));
     }
 
-    /// Update a specific core's volume based on its CPU usage
+    /// Update a specific core's volume and pitch based on its CPU usage
     pub fn update_core(&mut self, core_index: usize, target_value: f64) {
         if core_index >= self.volume_elements.len() {
             return;
@@ -326,8 +350,18 @@ impl PerCoreCpuPlayer {
         self.current_values[core_index] +=
             (target - self.current_values[core_index]) * self.transition_speed;
 
-        let volume = self.current_values[core_index] * self.master_volume;
+        let smoothed = self.current_values[core_index];
+
+        // Update volume
+        let volume = smoothed * self.master_volume;
         self.volume_elements[core_index].set_property("volume", volume.clamp(0.0, 1.0));
+
+        // Update pitch if frequency fluctuation is enabled
+        if self.frequency_fluctuation {
+            // Map 0.0-1.0 to pitch range 0.8-1.2
+            let pitch = 0.8 + smoothed * 0.4;
+            self.pitch_elements[core_index].set_property("pitch", pitch);
+        }
     }
 
     pub fn set_master_volume(&mut self, volume: f64) {
