@@ -197,8 +197,10 @@ fn hann_fade(phase: f64) -> f32 {
 /// GStreamer element that wraps the granular pitch shifter
 #[derive(Default)]
 pub struct GranularPitch {
-    state: Mutex<Option<GranularPitchShifter>>,
+    /// One shifter per channel for proper stereo handling
+    shifters: Mutex<Vec<GranularPitchShifter>>,
     pitch_ratio: Mutex<f64>,
+    channels: Mutex<usize>,
 }
 
 #[glib::object_subclass]
@@ -228,7 +230,7 @@ impl ObjectImpl for GranularPitch {
             "pitch" => {
                 let pitch = value.get::<f64>().expect("pitch must be f64");
                 *self.pitch_ratio.lock().unwrap() = pitch;
-                if let Some(ref mut shifter) = *self.state.lock().unwrap() {
+                for shifter in self.shifters.lock().unwrap().iter_mut() {
                     shifter.set_pitch_ratio(pitch);
                 }
             }
@@ -287,30 +289,43 @@ impl BaseTransformImpl for GranularPitch {
             .map_err(|_| gst::loggable_error!(gst::CAT_RUST, "Failed to parse caps"))?;
 
         let sample_rate = info.rate();
+        let channels = info.channels() as usize;
         let grain_ms = 25.0; // 25ms grains
+        let pitch = *self.pitch_ratio.lock().unwrap();
 
-        let mut shifter = GranularPitchShifter::new(sample_rate, grain_ms);
-        shifter.set_pitch_ratio(*self.pitch_ratio.lock().unwrap());
+        // Create one shifter per channel for proper stereo handling
+        let mut shifters = Vec::with_capacity(channels);
+        for _ in 0..channels {
+            let mut shifter = GranularPitchShifter::new(sample_rate, grain_ms);
+            shifter.set_pitch_ratio(pitch);
+            shifters.push(shifter);
+        }
 
-        *self.state.lock().unwrap() = Some(shifter);
+        *self.shifters.lock().unwrap() = shifters;
+        *self.channels.lock().unwrap() = channels;
 
         Ok(())
     }
 
     fn stop(&self) -> Result<(), gst::ErrorMessage> {
-        *self.state.lock().unwrap() = None;
+        self.shifters.lock().unwrap().clear();
         Ok(())
     }
 
     fn transform_ip(&self, buf: &mut gst::BufferRef) -> Result<gst::FlowSuccess, gst::FlowError> {
-        let mut state_guard = self.state.lock().unwrap();
-        let shifter = state_guard.as_mut().ok_or_else(|| {
+        let mut shifters_guard = self.shifters.lock().unwrap();
+        if shifters_guard.is_empty() {
             gst::element_imp_error!(self, gst::CoreError::Negotiation, ["Not negotiated yet"]);
-            gst::FlowError::NotNegotiated
-        })?;
+            return Err(gst::FlowError::NotNegotiated);
+        }
 
         // Update pitch ratio in case it changed
-        shifter.set_pitch_ratio(*self.pitch_ratio.lock().unwrap());
+        let pitch = *self.pitch_ratio.lock().unwrap();
+        for shifter in shifters_guard.iter_mut() {
+            shifter.set_pitch_ratio(pitch);
+        }
+
+        let channels = *self.channels.lock().unwrap();
 
         let mut map = buf.map_writable().map_err(|_| {
             gst::element_imp_error!(self, gst::LibraryError::Failed, ["Failed to map buffer"]);
@@ -326,9 +341,14 @@ impl BaseTransformImpl for GranularPitch {
             )
         };
 
-        // Process each sample
-        for sample in samples.iter_mut() {
-            *sample = shifter.process_sample(*sample);
+        // Process audio frame-by-frame with one shifter per channel
+        // This ensures proper handling of stereo/multi-channel audio
+        for frame in samples.chunks_mut(channels) {
+            for (ch, sample) in frame.iter_mut().enumerate() {
+                if ch < shifters_guard.len() {
+                    *sample = shifters_guard[ch].process_sample(*sample);
+                }
+            }
         }
 
         Ok(gst::FlowSuccess::Ok)
