@@ -1,0 +1,23 @@
+[package]
+name = "charm-linux"
+version = "0.1.0"
+edition = "2021"
+description = "Customizable Audio Resource Monitor - converts system metrics into audio feedback"
+license = "MIT"
+authors = ["Harley"]
+repository = "https://github.com/destructatron/charm-linux"
+keywords = ["audio", "system-monitor", "gtk", "gstreamer", "accessibility"]
+categories = ["multimedia::audio"]
+
+[dependencies]
+gtk = "0.18"
+gdk = "0.18"
+glib = "0.18"
+gio = "0.18"
+atk = "0.18"
+gstreamer = "0.22"
+gstreamer-audio = "0.22"
+sysinfo = "0.31"
+libappindicator = "0.9"
+rust-ini = "0.21"
+directories = "5.0"
