@@ -56,7 +56,7 @@ impl App {
         &self.available_packs
     }
 
-    /// Start directly with a named pack (for headless/CLI usage)
+    /// Start directly with a named pack (for GUI mode with tray)
     /// Returns true if pack was found and started, false otherwise
     pub fn start_with_pack(app: Rc<RefCell<Self>>, pack_name: &str) -> bool {
         let pack_index = {
@@ -69,6 +69,25 @@ impl App {
         if let Some(index) = pack_index {
             app.borrow_mut().selected_pack_index = Some(index);
             Self::start_monitoring(app, index);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Start in headless mode (no GTK, no tray)
+    /// Returns true if pack was found and started, false otherwise
+    pub fn start_headless(app: Rc<RefCell<Self>>, pack_name: &str) -> bool {
+        let pack_index = {
+            let app_ref = app.borrow();
+            app_ref.available_packs.iter().position(|p| {
+                p.name().eq_ignore_ascii_case(pack_name)
+            })
+        };
+
+        if let Some(index) = pack_index {
+            app.borrow_mut().selected_pack_index = Some(index);
+            Self::start_monitoring_headless(app, index);
             true
         } else {
             false
@@ -229,6 +248,45 @@ impl App {
             tray.set_callbacks(callbacks);
             app.borrow_mut().tray = Some(tray);
         }
+
+        app.borrow_mut().is_monitoring = true;
+
+        // Start audio playback
+        if let Err(e) = app.borrow().audio_engine.borrow_mut().play() {
+            eprintln!("Failed to start playback: {}", e);
+        }
+
+        // Start the update loop
+        Self::start_update_loop(app);
+    }
+
+    /// Start monitoring in headless mode (no tray, no GTK)
+    fn start_monitoring_headless(app: Rc<RefCell<Self>>, pack_index: usize) {
+        let pack = {
+            let app_ref = app.borrow();
+            app_ref.available_packs.get(pack_index).cloned()
+        };
+
+        let pack = match pack {
+            Some(p) => p,
+            None => {
+                eprintln!("Invalid pack index");
+                return;
+            }
+        };
+
+        // Load the pack into audio engine
+        {
+            let app_ref = app.borrow();
+            let num_cores = app_ref.system_monitor.borrow().core_count();
+            let mut engine = app_ref.audio_engine.borrow_mut();
+            if let Err(e) = engine.load_pack(pack, num_cores) {
+                eprintln!("Failed to load pack: {}", e);
+                return;
+            }
+        }
+
+        // No tray in headless mode
 
         app.borrow_mut().is_monitoring = true;
 

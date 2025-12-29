@@ -68,10 +68,15 @@ fn main() {
         None
     };
 
-    // Initialize GTK
-    if let Err(e) = gtk::init() {
-        eprintln!("Failed to initialize GTK: {}", e);
-        std::process::exit(1);
+    // Headless mode: run without GTK when pack name is specified
+    let headless = pack_name.is_some();
+
+    if !headless {
+        // Initialize GTK only for GUI mode
+        if let Err(e) = gtk::init() {
+            eprintln!("Failed to initialize GTK: {}", e);
+            std::process::exit(1);
+        }
     }
 
     // Set application name for accessibility
@@ -91,23 +96,40 @@ fn main() {
         }
     };
 
-    // If pack name specified, start directly; otherwise show dialog
-    if let Some(name) = pack_name {
-        if !App::start_with_pack(app.clone(), &name) {
+    if headless {
+        // Headless mode: start directly with the specified pack
+        let name = pack_name.unwrap();
+        if !App::start_headless(app.clone(), &name) {
             eprintln!("Failed to start with pack '{}'. Available packs:", name);
             for pack in app.borrow().packs() {
                 eprintln!("  - {}", pack.name());
             }
             std::process::exit(1);
         }
+
+        // Create a glib main loop (no GTK required)
+        let main_loop = glib::MainLoop::new(None, false);
+        let main_loop_clone = main_loop.clone();
+
+        // Handle Ctrl+C for graceful shutdown
+        let _ = ctrlc::set_handler(move || {
+            // Signal the main loop to quit
+            main_loop_clone.quit();
+        });
+
+        println!("Running in headless mode with pack '{}'. Press Ctrl+C to exit.", name);
+        main_loop.run();
+
+        // Cleanup
+        app.borrow_mut().shutdown();
     } else {
-        // Show startup dialog
+        // GUI mode: show startup dialog
         App::show_startup_dialog(app.clone());
+
+        // Run GTK main loop
+        gtk::main();
+
+        // Cleanup
+        app.borrow_mut().shutdown();
     }
-
-    // Run GTK main loop
-    gtk::main();
-
-    // Cleanup
-    app.borrow_mut().shutdown();
 }
