@@ -32,8 +32,11 @@ impl PlaybackElement {
             .property("uri", &uri)
             .build()?;
 
+        // Queue for buffering and thread decoupling
+        let queue = gst::ElementFactory::make("queue").build()?;
         let convert = gst::ElementFactory::make("audioconvert").build()?;
         let resample = gst::ElementFactory::make("audioresample").build()?;
+
         let volume_element = gst::ElementFactory::make("volume")
             .property("volume", 0.0f64)
             .build()?;
@@ -46,20 +49,20 @@ impl PlaybackElement {
 
         let sink = gst::ElementFactory::make("autoaudiosink").build()?;
 
-        // Add elements to pipeline
+        // Add elements to pipeline and link them
         if let Some(ref pan_elem) = panorama_element {
-            pipeline.add_many([&source, &convert, &resample, &volume_element, pan_elem, &sink])?;
-            gst::Element::link_many([&convert, &resample, &volume_element, pan_elem, &sink])?;
+            pipeline.add_many([&source, &queue, &convert, &resample, &volume_element, pan_elem, &sink])?;
+            gst::Element::link_many([&queue, &convert, &resample, &volume_element, pan_elem, &sink])?;
         } else {
-            pipeline.add_many([&source, &convert, &resample, &volume_element, &sink])?;
-            gst::Element::link_many([&convert, &resample, &volume_element, &sink])?;
+            pipeline.add_many([&source, &queue, &convert, &resample, &volume_element, &sink])?;
+            gst::Element::link_many([&queue, &convert, &resample, &volume_element, &sink])?;
         }
 
-        // Connect uridecodebin's pad-added signal to link to convert
-        let convert_weak = convert.downgrade();
+        // Connect uridecodebin's pad-added signal to link to queue
+        let queue_weak = queue.downgrade();
         source.connect_pad_added(move |_, src_pad| {
-            if let Some(convert) = convert_weak.upgrade() {
-                if let Some(sink_pad) = convert.static_pad("sink") {
+            if let Some(queue) = queue_weak.upgrade() {
+                if let Some(sink_pad) = queue.static_pad("sink") {
                     if !sink_pad.is_linked() {
                         let _ = src_pad.link(&sink_pad);
                     }
@@ -73,8 +76,9 @@ impl PlaybackElement {
             match msg.view() {
                 gst::MessageView::Eos(_) => {
                     if let Some(pipeline) = pipeline_weak.upgrade() {
+                        // Simple seek back to start for looping
                         let _ = pipeline.seek_simple(
-                            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                            gst::SeekFlags::FLUSH,
                             gst::ClockTime::ZERO,
                         );
                     }
@@ -127,16 +131,9 @@ impl PlaybackElement {
         }
     }
 
-    fn set_rate(&self, rate: f64) {
-        let rate = rate.clamp(0.25, 4.0);
-        let _ = self.pipeline.seek(
-            rate,
-            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
-            gst::SeekType::Set,
-            gst::ClockTime::ZERO,
-            gst::SeekType::None,
-            gst::ClockTime::NONE,
-        );
+    fn set_rate(&self, _rate: f64) {
+        // Pitch shifting disabled for PlaybackElement to avoid audio issues
+        // Per-core CPU mode uses PerCoreCpuPlayer which has pitch support
     }
 }
 
@@ -290,8 +287,9 @@ impl PerCoreCpuPlayer {
             match msg.view() {
                 gst::MessageView::Eos(_) => {
                     if let Some(pipeline) = pipeline_weak.upgrade() {
+                        // Simple seek back to start for looping
                         let _ = pipeline.seek_simple(
-                            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                            gst::SeekFlags::FLUSH,
                             gst::ClockTime::ZERO,
                         );
                     }
@@ -352,8 +350,11 @@ impl PerCoreCpuPlayer {
 
         let smoothed = self.current_values[core_index];
 
-        // Update volume
-        let volume = smoothed * self.master_volume;
+        // Update volume - normalize by sqrt of cores for balanced mixing
+        // Using sqrt means: 4 cores divides by 2, 8 cores by ~2.8, 16 cores by 4
+        // This keeps individual cores audible while preventing excessive summing
+        let num_cores = self.volume_elements.len() as f64;
+        let volume = (smoothed * self.master_volume) / num_cores.sqrt();
         self.volume_elements[core_index].set_property("volume", volume.clamp(0.0, 1.0));
 
         // Update pitch if frequency fluctuation is enabled
